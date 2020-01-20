@@ -59,21 +59,41 @@ fn generate_struct_fields(
                 for f in &fields.named {
                     let name = &f.ident;
                     let ty = &f.ty;
-                    options.push(quote_spanned!(f.span()=> #name: Option<#ty>));
+
                     empties.push(quote_spanned!(f.span()=> #name: None));
+                    fields_assign.push(quote_spanned!(f.span()=> #name));
+
+                    let optional_field = is_optional(&ty);
+                    let (converted_field_type, setter_type, checker) = if optional_field {
+                        let optional_inner_type = get_inner_type(&ty);
+                        (
+                            quote!(#ty),
+                            quote!(#optional_inner_type),
+                            quote_spanned!(f.span()=> let #name = self.#name.take();),
+                        )
+                    } else {
+                        (
+                            quote!(Option<#ty>),
+                            quote!(#ty),
+                            quote_spanned! {f.span()=>
+                                let #name = match self.#name.take() {
+                                    Some(value) => value,
+                                    None => return Err(From::from(format!("field {} is empty", stringify!(#name)))),
+                                };
+                            },
+                        )
+                    };
+
+                    options.push(quote_spanned!(f.span()=> #name: #converted_field_type));
+
                     methods.push(quote_spanned! {f.span()=>
-                        fn #name(&mut self, #name: #ty) -> &mut Self {
+                        fn #name(&mut self, #name: #setter_type) -> &mut Self {
                             self.#name = Some(#name);
                             self
                         }
                     });
-                    fields_checker.push(quote_spanned! {f.span()=>
-                        let #name = match self.#name.take() {
-                            Some(value) => value,
-                            None => return Err(From::from(format!("field {} is empty", stringify!(#name)))),
-                        };
-                    });
-                    fields_assign.push(quote_spanned!(f.span()=> #name: #name));
+
+                    fields_checker.push(checker);
                 }
 
                 (
@@ -93,5 +113,31 @@ fn generate_struct_fields(
             _ => unimplemented!(),
         },
         _ => unimplemented!(),
+    }
+}
+
+fn is_optional(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(ref ty_path) => {
+            ty_path.path.segments[0].ident == "Option"
+        },
+        _ => false
+    }
+}
+
+fn get_inner_type(ty: &syn::Type) -> &syn::Type {
+    match ty {
+        syn::Type::Path(ref type_path) => {
+            match type_path.path.segments[0].arguments {
+                syn::PathArguments::AngleBracketed(ref angle_bracketed) => {
+                    match angle_bracketed.args[0] {
+                        syn::GenericArgument::Type(ref arg_type) => arg_type,
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!()
+            }
+        }
+        _ => unreachable!()
     }
 }
