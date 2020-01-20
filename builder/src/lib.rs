@@ -123,9 +123,17 @@ fn generate_struct_fields(
 }
 
 fn is_optional(ty: &syn::Type) -> bool {
+    check_type_ident("Option", ty)
+}
+
+fn is_vec(ty: &syn::Type) -> bool {
+    check_type_ident("Vec", ty)
+}
+
+fn check_type_ident(ident_str: &str, ty: &syn::Type) -> bool {
     match ty {
         syn::Type::Path(ref ty_path) => {
-            ty_path.path.segments[0].ident == "Option"
+            ty_path.path.segments[0].ident == ident_str
         },
         _ => false
     }
@@ -165,28 +173,33 @@ fn generate_extra(field: &syn::Field) -> Vec<proc_macro2::TokenStream> {
                                     compile_error!("unrecognized attribute in `builder`");
                                 });
                             } else {
-                                // let vector_type = &field.ty;
-                                let name = &field.ident;
-                                let inner_type = get_inner_type(&field.ty);
-                                eprintln!("each inner type {:?}", inner_type);
-
-                                if let Lit::Str(each) = &name_value.lit {
-                                    eprintln!("each LitStr {:?}", each);
-                                    let each_value = format_ident!("{}", each.value());
-                                    eprintln!("each value {:?}", each_value);
+                                if !is_vec(&field.ty) {
                                     extra.push(quote_spanned! {field.span()=>
-                                        pub fn #each_value (&mut self, #each_value: #inner_type) -> &mut Self {
-                                            let new_vector = match self.#name.take() {
-                                                Some(mut vector) => {
-                                                    vector.push(#each_value);
-                                                    vector
-                                                },
-                                                None => vec![#each_value],
-                                            };
-                                            self.#name = Some(new_vector);
-                                            self
-                                        }
-                                    });
+                                        compile_error!("each can only be applied to Vec<T> types");}
+                                    );
+                                } else if let Lit::Str(each) = &name_value.lit {
+                                    let name = &field.ident;
+                                    if each.value() == name.as_ref().unwrap().to_string() {
+                                        extra.push(quote_spanned! {field.span()=>
+                                            compile_error!("each has the same name as the struct field");}
+                                        );
+                                    } else {
+                                        let each_value = format_ident!("{}", each.value());
+                                        let inner_type = get_inner_type(&field.ty);
+                                        extra.push(quote_spanned! {field.span()=>
+                                            pub fn #each_value (&mut self, #each_value: #inner_type) -> &mut Self {
+                                                let new_vector = match self.#name.take() {
+                                                    Some(mut vector) => {
+                                                        vector.push(#each_value);
+                                                        vector
+                                                    },
+                                                    None => vec![#each_value],
+                                                };
+                                                self.#name = Some(new_vector);
+                                                self
+                                            }
+                                        });
+                                    }
                                 } else {
                                     extra.push(quote_spanned! {field.span()=>
                                         compile_error!("unrecognized value for `each` attribute in `builder`");
