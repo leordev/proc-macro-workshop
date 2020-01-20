@@ -3,16 +3,16 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Meta, NestedMeta, Lit};
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     // eprintln!("INPUT: {:#?}", input);
 
     let ident = input.ident;
     let ident_builder = format_ident!("{}Builder", ident);
-    let (option_fields, empty_fields, fields_methods, builder_function) =
+    let (option_fields, empty_fields, fields_methods, builder_function, extra_fields) =
         generate_struct_fields(&ident, &input.data);
 
     let expanded = quote! {
@@ -22,6 +22,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #ident_builder {
             #fields_methods
+            #extra_fields
             #builder_function
         }
 
@@ -46,6 +47,7 @@ fn generate_struct_fields(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
 ) {
     match *data {
         Data::Struct(ref data) => match data.fields {
@@ -55,6 +57,7 @@ fn generate_struct_fields(
                 let mut methods = Vec::new();
                 let mut fields_checker = Vec::new();
                 let mut fields_assign = Vec::new();
+                let mut extra_fields = Vec::new();
 
                 for f in &fields.named {
                     let name = &f.ident;
@@ -94,6 +97,8 @@ fn generate_struct_fields(
                     });
 
                     fields_checker.push(checker);
+
+                    extra_fields.append(generate_extra(&f).as_mut());
                 }
 
                 (
@@ -108,6 +113,7 @@ fn generate_struct_fields(
                             })
                         }
                     },
+                    quote!(#(#extra_fields)*),
                 )
             }
             _ => unimplemented!(),
@@ -140,4 +146,61 @@ fn get_inner_type(ty: &syn::Type) -> &syn::Type {
         }
         _ => unreachable!()
     }
+}
+
+fn generate_extra(field: &syn::Field) -> Vec<proc_macro2::TokenStream> {
+    let mut extra = Vec::new();
+
+    for attribute in &field.attrs {
+        let is_builder = attribute.path.is_ident("builder");
+        if is_builder {
+            let parsed_meta = attribute.parse_meta().unwrap();
+
+            match parsed_meta {
+                Meta::List(meta_list) => {
+                    match &meta_list.nested[0] {
+                        NestedMeta::Meta(Meta::NameValue(name_value)) => {
+                            if !name_value.path.is_ident("each") {
+                                extra.push(quote_spanned! {field.span()=>
+                                    compile_error!("unrecognized attribute in `builder`");
+                                });
+                            } else {
+                                // let vector_type = &field.ty;
+                                let name = &field.ident;
+                                let inner_type = get_inner_type(&field.ty);
+                                eprintln!("each inner type {:?}", inner_type);
+
+                                if let Lit::Str(each) = &name_value.lit {
+                                    eprintln!("each LitStr {:?}", each);
+                                    let each_value = format_ident!("{}", each.value());
+                                    eprintln!("each value {:?}", each_value);
+                                    extra.push(quote_spanned! {field.span()=>
+                                        pub fn #each_value (&mut self, #each_value: #inner_type) -> &mut Self {
+                                            let new_vector = match self.#name.take() {
+                                                Some(mut vector) => {
+                                                    vector.push(#each_value);
+                                                    vector
+                                                },
+                                                None => vec![#each_value],
+                                            };
+                                            self.#name = Some(new_vector);
+                                            self
+                                        }
+                                    });
+                                } else {
+                                    extra.push(quote_spanned! {field.span()=>
+                                        compile_error!("unrecognized value for `each` attribute in `builder`");
+                                    });
+                                }
+                            }
+                        },
+                        _ => unreachable!(),
+                    }
+                },
+                _ => unreachable!(),
+            };
+        }
+    }
+
+    extra
 }
