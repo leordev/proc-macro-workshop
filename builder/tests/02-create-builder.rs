@@ -55,5 +55,8 @@ pub struct Command {
 fn main() {
     let builder = Command::builder();
 
-    let _ = builder;
+    assert_eq!(builder.executable, None);
+    assert_eq!(builder.args, None);
+    assert_eq!(builder.env, None);
+    assert_eq!(builder.current_dir, None);
 }
