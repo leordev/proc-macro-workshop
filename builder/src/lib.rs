@@ -69,7 +69,7 @@ fn generate_builder_derive(ident: &proc_macro2::Ident, data: &Data) -> BuilderDe
                     let name = &f.ident;
                     let ty = &f.ty;
 
-                    empties.push(quote_spanned!(f.span()=> #name: None));
+                    empties.push(quote_spanned!(f.span()=> #name: std::option::Option::None));
                     fields_assign.push(quote_spanned!(f.span()=> #name));
 
                     let optional_field = is_optional(&ty);
@@ -82,12 +82,12 @@ fn generate_builder_derive(ident: &proc_macro2::Ident, data: &Data) -> BuilderDe
                         )
                     } else {
                         (
-                            quote!(Option<#ty>),
+                            quote!(std::option::Option<#ty>),
                             quote!(#ty),
                             quote_spanned! {f.span()=>
                                 let #name = match self.#name.take() {
-                                    Some(value) => value,
-                                    None => return Err(From::from(format!("field {} is empty", stringify!(#name)))),
+                                    std::option::Option::Some(value) => value,
+                                    std::option::Option::None => return Err(From::from(format!("field {} is empty", stringify!(#name)))),
                                 };
                             },
                         )
@@ -97,7 +97,7 @@ fn generate_builder_derive(ident: &proc_macro2::Ident, data: &Data) -> BuilderDe
 
                     methods.push(quote_spanned! {f.span()=>
                         fn #name(&mut self, #name: #setter_type) -> &mut Self {
-                            self.#name = Some(#name);
+                            self.#name = std::option::Option::Some(#name);
                             self
                         }
                     });
@@ -112,7 +112,7 @@ fn generate_builder_derive(ident: &proc_macro2::Ident, data: &Data) -> BuilderDe
                     empty_fields: quote!(#(#empties),*),
                     fields_methods: quote!(#(#methods)*),
                     builder_function: quote! {
-                        pub fn build(&mut self) -> Result<#ident, Box<dyn std::error::Error>> {
+                        pub fn build(&mut self) -> std::result::Result<#ident, std::boxed::Box<dyn std::error::Error>> {
                             #(#fields_checker)*
                             Ok(#ident {
                                 #(#fields_assign),*
@@ -174,18 +174,18 @@ fn add_builder_attribute_extras(
     let parsed_meta = attribute.parse_meta().unwrap();
 
     if let Meta::List(meta_list) = parsed_meta {
-        let each_name_value = &meta_list.nested.iter().find_map(|i| {
-            if let NestedMeta::Meta(Meta::NameValue(name_value)) = i {
+        let mut each_name_value = None;
+        for item in &meta_list.nested {
+            if let NestedMeta::Meta(Meta::NameValue(name_value)) = item {
                 if name_value.path.is_ident("each") {
-                    return Some(name_value);
+                    each_name_value = Some(name_value);
                 }
             }
-            None
-        });
+        }
 
         if each_name_value.is_none() {
-            extra.push(quote_spanned! {field.span()=>
-                compile_error!("attribute `each` not found in `builder`");
+            extra.push(quote_spanned! {attribute.span()=>
+                compile_error!("expected `builder(each = \"...\")`");
             });
             return;
         }
@@ -209,13 +209,13 @@ fn add_builder_attribute_extras(
                 extra.push(quote_spanned! {field.span()=>
                     pub fn #each_value (&mut self, #each_value: #inner_type) -> &mut Self {
                         let new_vector = match self.#name.take() {
-                            Some(mut vector) => {
+                            std::option::Option::Some(mut vector) => {
                                 vector.push(#each_value);
                                 vector
                             },
-                            None => vec![#each_value],
+                            std::option::Option::None => vec![#each_value],
                         };
-                        self.#name = Some(new_vector);
+                        self.#name = std::option::Option::Some(new_vector);
                         self
                     }
                 });
