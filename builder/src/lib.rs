@@ -3,7 +3,17 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Meta, NestedMeta, Lit};
+use syn::PathArguments::AngleBracketed;
+use syn::Type::Path;
+use syn::{parse_macro_input, Data, DeriveInput, Fields, GenericArgument, Lit, Meta, NestedMeta};
+
+struct BuilderDerive {
+    option_fields: proc_macro2::TokenStream,
+    empty_fields: proc_macro2::TokenStream,
+    fields_methods: proc_macro2::TokenStream,
+    builder_function: proc_macro2::TokenStream,
+    extra_fields: proc_macro2::TokenStream,
+}
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -12,8 +22,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let ident = input.ident;
     let ident_builder = format_ident!("{}Builder", ident);
-    let (option_fields, empty_fields, fields_methods, builder_function, extra_fields) =
-        generate_struct_fields(&ident, &input.data);
+    let BuilderDerive {
+        option_fields,
+        empty_fields,
+        fields_methods,
+        builder_function,
+        extra_fields,
+    } = generate_builder_derive(&ident, &input.data);
 
     let expanded = quote! {
         pub struct #ident_builder {
@@ -35,20 +50,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     };
 
-    eprintln!("TOKENS:\n{}", expanded);
+    // eprintln!("TOKENS:\n{}", expanded);
     TokenStream::from(expanded)
 }
 
-fn generate_struct_fields(
-    ident: &proc_macro2::Ident,
-    data: &Data,
-) -> (
-    proc_macro2::TokenStream,
-    proc_macro2::TokenStream,
-    proc_macro2::TokenStream,
-    proc_macro2::TokenStream,
-    proc_macro2::TokenStream,
-) {
+fn generate_builder_derive(ident: &proc_macro2::Ident, data: &Data) -> BuilderDerive {
     match *data {
         Data::Struct(ref data) => match data.fields {
             Fields::Named(ref fields) => {
@@ -101,11 +107,11 @@ fn generate_struct_fields(
                     extra_fields.append(generate_extra(&f).as_mut());
                 }
 
-                (
-                    quote!(#(#options),*),
-                    quote!(#(#empties),*),
-                    quote!(#(#methods)*),
-                    quote! {
+                BuilderDerive {
+                    option_fields: quote!(#(#options),*),
+                    empty_fields: quote!(#(#empties),*),
+                    fields_methods: quote!(#(#methods)*),
+                    builder_function: quote! {
                         pub fn build(&mut self) -> Result<#ident, Box<dyn std::error::Error>> {
                             #(#fields_checker)*
                             Ok(#ident {
@@ -113,8 +119,8 @@ fn generate_struct_fields(
                             })
                         }
                     },
-                    quote!(#(#extra_fields)*),
-                )
+                    extra_fields: quote!(#(#extra_fields)*),
+                }
             }
             _ => unimplemented!(),
         },
@@ -131,89 +137,93 @@ fn is_vec(ty: &syn::Type) -> bool {
 }
 
 fn check_type_ident(ident_str: &str, ty: &syn::Type) -> bool {
-    match ty {
-        syn::Type::Path(ref ty_path) => {
-            ty_path.path.segments[0].ident == ident_str
-        },
-        _ => false
+    if let Path(ref ty_path) = ty {
+        return ty_path.path.segments[0].ident == ident_str;
     }
+    false
 }
 
 fn get_inner_type(ty: &syn::Type) -> &syn::Type {
-    match ty {
-        syn::Type::Path(ref type_path) => {
-            match type_path.path.segments[0].arguments {
-                syn::PathArguments::AngleBracketed(ref angle_bracketed) => {
-                    match angle_bracketed.args[0] {
-                        syn::GenericArgument::Type(ref arg_type) => arg_type,
-                        _ => unreachable!(),
-                    }
-                }
-                _ => unreachable!()
+    if let Path(ref type_path) = ty {
+        if let AngleBracketed(ref angle_bracketed) = type_path.path.segments[0].arguments {
+            if let GenericArgument::Type(ref arg_type) = angle_bracketed.args[0] {
+                return arg_type;
             }
         }
-        _ => unreachable!()
     }
+    unreachable!()
 }
 
 fn generate_extra(field: &syn::Field) -> Vec<proc_macro2::TokenStream> {
     let mut extra = Vec::new();
 
     for attribute in &field.attrs {
-        let is_builder = attribute.path.is_ident("builder");
-        if is_builder {
-            let parsed_meta = attribute.parse_meta().unwrap();
-
-            match parsed_meta {
-                Meta::List(meta_list) => {
-                    match &meta_list.nested[0] {
-                        NestedMeta::Meta(Meta::NameValue(name_value)) => {
-                            if !name_value.path.is_ident("each") {
-                                extra.push(quote_spanned! {field.span()=>
-                                    compile_error!("unrecognized attribute in `builder`");
-                                });
-                            } else {
-                                if !is_vec(&field.ty) {
-                                    extra.push(quote_spanned! {field.span()=>
-                                        compile_error!("each can only be applied to Vec<T> types");}
-                                    );
-                                } else if let Lit::Str(each) = &name_value.lit {
-                                    let name = &field.ident;
-                                    if each.value() == name.as_ref().unwrap().to_string() {
-                                        extra.push(quote_spanned! {field.span()=>
-                                            compile_error!("each has the same name as the struct field");}
-                                        );
-                                    } else {
-                                        let each_value = format_ident!("{}", each.value());
-                                        let inner_type = get_inner_type(&field.ty);
-                                        extra.push(quote_spanned! {field.span()=>
-                                            pub fn #each_value (&mut self, #each_value: #inner_type) -> &mut Self {
-                                                let new_vector = match self.#name.take() {
-                                                    Some(mut vector) => {
-                                                        vector.push(#each_value);
-                                                        vector
-                                                    },
-                                                    None => vec![#each_value],
-                                                };
-                                                self.#name = Some(new_vector);
-                                                self
-                                            }
-                                        });
-                                    }
-                                } else {
-                                    extra.push(quote_spanned! {field.span()=>
-                                        compile_error!("unrecognized value for `each` attribute in `builder`");
-                                    });
-                                }
-                            }
-                        },
-                        _ => unreachable!(),
-                    }
-                },
-                _ => unreachable!(),
-            };
+        if attribute.path.is_ident("builder") {
+            add_builder_attribute_extras(field, attribute, &mut extra);
         }
     }
 
     extra
+}
+
+fn add_builder_attribute_extras(
+    field: &syn::Field,
+    attribute: &syn::Attribute,
+    extra: &mut Vec<proc_macro2::TokenStream>,
+) {
+    let parsed_meta = attribute.parse_meta().unwrap();
+
+    if let Meta::List(meta_list) = parsed_meta {
+        let each_name_value = &meta_list.nested.iter().find_map(|i| {
+            if let NestedMeta::Meta(Meta::NameValue(name_value)) = i {
+                if name_value.path.is_ident("each") {
+                    return Some(name_value);
+                }
+            }
+            None
+        });
+
+        if each_name_value.is_none() {
+            extra.push(quote_spanned! {field.span()=>
+                compile_error!("attribute `each` not found in `builder`");
+            });
+            return;
+        }
+
+        let each_name_value = each_name_value.unwrap();
+
+        if !is_vec(&field.ty) {
+            extra.push(quote_spanned! {field.span()=>
+            compile_error!("`each` can only be applied to Vec<T> types");});
+            return;
+        }
+
+        if let Lit::Str(each) = &each_name_value.lit {
+            let name = &field.ident;
+            if each.value() == name.as_ref().unwrap().to_string() {
+                extra.push(quote_spanned! {field.span()=>
+                compile_error!("each has the same name as the struct field");});
+            } else {
+                let each_value = format_ident!("{}", each.value());
+                let inner_type = get_inner_type(&field.ty);
+                extra.push(quote_spanned! {field.span()=>
+                    pub fn #each_value (&mut self, #each_value: #inner_type) -> &mut Self {
+                        let new_vector = match self.#name.take() {
+                            Some(mut vector) => {
+                                vector.push(#each_value);
+                                vector
+                            },
+                            None => vec![#each_value],
+                        };
+                        self.#name = Some(new_vector);
+                        self
+                    }
+                });
+            }
+        } else {
+            extra.push(quote_spanned! {field.span()=>
+                compile_error!("unrecognized value for `each` attribute in `builder`");
+            });
+        }
+    }
 }
